@@ -2,7 +2,8 @@
 """Tiny fake Frigate for developing Frigate Lite without a real server.
 
 Serves the endpoints Frigate Lite uses (/api/config, /api/<camera>/latest.jpg,
-/api/login) with moving ffmpeg test patterns, and prints the request rate every
+/api/login, /api/events and each event's thumbnail.jpg, snapshot.jpg and clip.mp4)
+with moving ffmpeg test patterns, and prints the request rate every
 10 s so you can check FPS limits and pausing.
 
     python3 tools/mock_frigate.py                    # http://127.0.0.1:5055, 12 cameras
@@ -61,6 +62,42 @@ def render_frames(workdir, names):
     return frames
 
 
+def render_clips(workdir, names):
+    """One short H.264 clip per camera, served as every event clip of that camera."""
+    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    codec = "libx264" if " libx264 " in encoders else "h264_videotoolbox"
+    clips = {}
+    for i, name in enumerate(names):
+        out = os.path.join(workdir, f"{name}.mp4")
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+                        "-i", "testsrc2=size=640x360:rate=15:duration=6", "-vf", f"hue=h={i * 30}",
+                        "-c:v", codec, "-pix_fmt", "yuv420p", "-movflags", "+faststart", out], check=True)
+        clips[name] = open(out, "rb").read()
+    return clips
+
+
+def build_events(names, count=40):
+    """Newest first, like Frigate. The newest is still in progress; every 5th has no clip."""
+    now = time.time()
+    labels = ["person", "cat", "car", "dog", "cat"]
+    events = []
+    for i in range(count):
+        start = now - 60 - i * 1500 - (i * 137) % 600
+        events.append({
+            "id": f"{start:.6f}-mock{i:02d}",
+            "camera": names[i % len(names)],
+            "label": labels[i % len(labels)],
+            "sub_label": ["Dan", 0.91] if i % 7 == 3 else None,
+            "start_time": start,
+            "end_time": None if i == 0 else start + 5 + (i * 11) % 90,
+            "has_clip": i % 5 != 4,
+            "has_snapshot": True,
+            "zones": ["porch"] if i % 3 == 0 else [],
+            "data": {"top_score": 0.6 + (i % 4) / 10, "score": 0.7},
+        })
+    return events
+
+
 def build_config(names):
     cams = {}
     for i, name in enumerate(names):
@@ -110,7 +147,7 @@ class Stats:
                   flush=True)
 
 
-def make_handler(frames, config, auth, stats):
+def make_handler(frames, clips, events, config, auth, stats):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -160,6 +197,21 @@ def make_handler(frames, config, auth, stats):
                 return self.send(401, b'{"message":"Unauthorized"}')
             if url.path == "/api/config":
                 return self.send(200, json.dumps(config).encode())
+            if url.path == "/api/events":
+                q = parse_qs(url.query)
+                cams = q.get("cameras", ["all"])[0]
+                limit = int(q.get("limit", ["100"])[0])
+                found = [e for e in events if cams == "all" or e["camera"] in cams.split(",")]
+                return self.send(200, json.dumps(found[:limit]).encode())
+            if len(parts) == 4 and parts[:2] == ["api", "events"]:
+                event = next((e for e in events if e["id"] == parts[2]), None)
+                if event is None:
+                    return self.send(404, b'{"message":"Event not found"}')
+                if parts[3] in ("thumbnail.jpg", "snapshot.jpg"):
+                    return self.send(200, frames[event["camera"]][0], "image/jpeg")
+                if parts[3] == "clip.mp4" and event["has_clip"]:
+                    return self.send(200, clips[event["camera"]], "video/mp4")
+                return self.send(404, b'{"message":"No clip"}')
             if len(parts) == 3 and parts[0] == "api" and parts[2] in ("latest.jpg", "latest.webp"):
                 cam = parts[1]
                 source = frames.get(cam) or (frames[NAMES[0]] if cam == "birdseye" else None)
@@ -190,11 +242,12 @@ def main():
     workdir = tempfile.mkdtemp(prefix="mock-frigate-")
     print(f"rendering test frames for {len(names)} cameras…", flush=True)
     frames = render_frames(workdir, names)
+    clips = render_clips(workdir, names)
     auth = tuple(args.auth.split(":", 1)) if args.auth else None
     stats = Stats()
     threading.Thread(target=stats.report_forever, daemon=True).start()
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(frames, build_config(names), auth, stats))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(frames, clips, build_events(names), build_config(names), auth, stats))
     scheme = "http"
     if args.tls:
         cert, key = os.path.join(workdir, "cert.pem"), os.path.join(workdir, "key.pem")

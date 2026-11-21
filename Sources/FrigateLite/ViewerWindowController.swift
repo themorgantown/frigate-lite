@@ -11,9 +11,11 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     let mosaic = MosaicView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
     private let settings = Settings.shared
 
-    private var client: FrigateClient?
-    private var config: FrigateConfig?
-    private var focused: String?
+    private(set) var client: FrigateClient?
+    private(set) var config: FrigateConfig?
+    private(set) var focused: String?
+    /// Called after each successful (re)connect, so other windows can refresh with the new client.
+    var onConnected: (() -> Void)?
     private var loop: Task<Void, Never>?
     private var failedTicks = 0
 
@@ -126,6 +128,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
             mosaic.setFocus(last)
         }
         updateTitle()
+        onConnected?()
     }
 
     private func tick() async {

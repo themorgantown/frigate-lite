@@ -98,6 +98,7 @@ struct FrigateConfig: Sendable {
 enum FrigateError: LocalizedError {
     case badURL
     case badConfig
+    case badEvents
     case http(Int)
     case unauthorized
     case loginRejected
@@ -106,9 +107,49 @@ enum FrigateError: LocalizedError {
         switch self {
         case .badURL: return "The Frigate URL is not valid."
         case .badConfig: return "Frigate's /api/config response was not understood."
+        case .badEvents: return "Frigate's /api/events response was not understood."
         case .http(let code): return "Frigate answered HTTP \(code)."
         case .unauthorized: return "Frigate requires a login. Add username and password in Settings (⌘,)."
         case .loginRejected: return "Frigate rejected the username or password. Fix them in Settings (⌘,)."
+        }
+    }
+}
+
+/// One tracked object from `/api/events`. Parsed leniently, like the config.
+struct FrigateEvent: Sendable, Identifiable, Hashable {
+    let id: String
+    let camera: String
+    let label: String
+    let subLabel: String?
+    let start: Date
+    /// nil while the event is still in progress.
+    let end: Date?
+    let hasClip: Bool
+    let hasSnapshot: Bool
+    let score: Double?
+    let zones: [String]
+
+    static func parseList(_ data: Data) throws -> [FrigateEvent] {
+        guard let list = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw FrigateError.badEvents
+        }
+        return list.compactMap { e in
+            guard let id = e["id"] as? String, let camera = e["camera"] as? String,
+                  let start = e["start_time"] as? Double else { return nil }
+            // sub_label is a string in older Frigate and [name, score] in newer versions.
+            let sub = (e["sub_label"] as? String) ?? ((e["sub_label"] as? [Any])?.first as? String)
+            let data = e["data"] as? [String: Any]
+            return FrigateEvent(
+                id: id, camera: camera,
+                label: (e["label"] as? String) ?? "object",
+                subLabel: sub.flatMap { $0.isEmpty ? nil : $0 },
+                start: Date(timeIntervalSince1970: start),
+                end: (e["end_time"] as? Double).map { Date(timeIntervalSince1970: $0) },
+                hasClip: (e["has_clip"] as? Bool) ?? false,
+                hasSnapshot: (e["has_snapshot"] as? Bool) ?? false,
+                score: (data?["top_score"] as? Double) ?? (e["top_score"] as? Double) ?? (data?["score"] as? Double),
+                zones: (e["zones"] as? [String]) ?? []
+            )
         }
     }
 }
@@ -177,6 +218,40 @@ actor FrigateClient {
         try check(response)
         let offline = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Frigate-Offline") == "true"
         return FrameData(data: data, offline: offline)
+    }
+
+    /// Newest first. `include_thumbnails=0` stops older Frigate versions from inlining base64 thumbnails.
+    func events(camera: String?, limit: Int) async throws -> [FrigateEvent] {
+        var query = [URLQueryItem(name: "limit", value: String(limit)),
+                     URLQueryItem(name: "include_thumbnails", value: "0")]
+        if let camera { query.append(URLQueryItem(name: "cameras", value: camera)) }
+        return try FrigateEvent.parseList(try await get("api/events", query: query))
+    }
+
+    /// `file` is "thumbnail.jpg" or "snapshot.jpg".
+    func eventImage(id: String, file: String) async throws -> Data {
+        try await get("api/events/\(id)/\(file)")
+    }
+
+    /// Downloads the event clip to a temp file. AVPlayer can't use this session's login cookie
+    /// or its self-signed trust, so it plays the local file instead.
+    func downloadClip(id: String, to dest: URL) async throws {
+        try await ensureLoggedIn()
+        var req = URLRequest(url: base.appendingPathComponent("api/events/\(id)/clip.mp4"))
+        req.timeoutInterval = 60 // Frigate assembles the clip from recordings before the first byte
+        let (tmp, response) = try await session.download(for: req)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try check(response)
+        try FileManager.default.moveItem(at: tmp, to: dest)
+    }
+
+    private func get(_ path: String, query: [URLQueryItem] = []) async throws -> Data {
+        try await ensureLoggedIn()
+        var comps = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { comps.queryItems = query }
+        let (data, response) = try await session.data(for: URLRequest(url: comps.url!))
+        try check(response)
+        return data
     }
 
     private func check(_ response: URLResponse) throws {

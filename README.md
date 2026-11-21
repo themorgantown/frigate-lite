@@ -36,8 +36,11 @@ The password is stored in the Keychain. The app is ad-hoc signed, so after a reb
 | Keep window above others | `⌥⌘T` |
 | Reload the camera list | `⌘R` |
 | Full screen | `⌃⌘F` |
+| Events and their saved clips | `⌘E` (Window menu) |
 
 Tile status dots: **orange** = Frigate reports the camera offline (old frame shown). **Red** = the last fetch failed.
+
+**Events** lists Frigate's latest 100 tracked objects (label, camera, zones, time, score), newest first, filtered to the focused camera if one is focused. Select one to play its saved clip. Events without a clip show the snapshot, and the list marks them with a crossed-out camera. The clip is downloaded in full before it plays, so a long event takes a moment. The window loads only when it opens, when you press refresh, or when you select an event. It never polls.
 
 Camera order, `ui.dashboard`, friendly names and camera groups come from your Frigate config. If birdseye restream is on, **View → Camera Group → Birdseye** shows Frigate's server-side combined view as a single image.
 
@@ -73,7 +76,7 @@ Not measured: pausing on another Space, screen lock and display sleep. These use
 
 ```sh
 swift build                                   # debug build
-python3 tools/mock_frigate.py                 # fake Frigate on :5055 with 12 moving test cameras
+python3 tools/mock_frigate.py                 # fake Frigate on :5055 with 12 moving test cameras and 40 events
 python3 tools/mock_frigate.py --auth cat:meow --tls --port 5057   # like port 8971
 ```
 
@@ -89,6 +92,7 @@ FRIGATELITE_PASSWORD=meow build/FrigateLite.app/Contents/MacOS/FrigateLite -base
 Dev-only flags:
 
 - `-snapshotPath out.png [-snapshotDelay 6] [-snapshotQuit YES] [-snapshotSettings YES]`: write the camera view (or the Settings window) to a PNG. No Screen Recording permission needed.
+- `-snapshotEvents YES`: open the Events window at launch and select the newest event. With `-snapshotPath`, writes that window instead (the playing video shows as black, because it is drawn outside the layer tree).
 - `-debugHideAt 10 -debugUnhideAt 30`: hide and unhide the app, to test pausing.
 - `-debugAlwaysPoll YES`: keep refreshing while hidden or covered (for soak tests).
 
@@ -98,9 +102,10 @@ Dev-only flags:
 |---|---|
 | `ViewerWindowController.swift` | Refresh loop, pausing, focus/grid state, View menu |
 | `MosaicView.swift` | Layer-tree grid, one-commit updates, click and key input |
-| `FrigateClient.swift` | Login, `/api/config` parsing, frame fetch, JPEG decode |
+| `FrigateClient.swift` | Login, `/api/config` and `/api/events` parsing, frame and clip fetch, JPEG decode |
 | `Settings.swift` | UserDefaults and Keychain |
 | `SettingsWindow.swift` | SwiftUI settings form |
+| `EventsWindow.swift` | Event list, thumbnails, clip download and playback |
 | `AppDelegate.swift` | Menus, startup, dev snapshot hooks |
 
 ## License

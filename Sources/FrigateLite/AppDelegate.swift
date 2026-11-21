@@ -5,15 +5,18 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var viewer: ViewerWindowController!
     private var settingsWindow: SettingsWindowController?
+    private var eventsWindow: EventsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         viewer = ViewerWindowController()
+        viewer.onConnected = { [weak self] in self?.eventsWindow?.reloadIfOpen() }
         NSApp.mainMenu = buildMainMenu()
         viewer.showWindow(nil)
         NSApp.activate()
         viewer.reconnect()
         if Settings.shared.baseURL.isEmpty { openSettings() }
+        if UserDefaults.standard.bool(forKey: "snapshotEvents") { openEvents() }
         DebugSnapshot.scheduleIfRequested(view: viewer.mosaic)
     }
 
@@ -26,6 +29,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         settingsWindow?.present()
+    }
+
+    /// Opens the event list, filtered to the focused camera if there is one.
+    func openEvents() {
+        if eventsWindow == nil {
+            eventsWindow = EventsWindowController { [weak self] in (self?.viewer.client, self?.viewer.config) }
+        }
+        eventsWindow?.present(camera: viewer.focused)
     }
 
     private func buildMainMenu() -> NSMenu {
@@ -67,6 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(ActionItem("Events", key: "e") { [weak self] in self?.openEvents() })
         main.addItem(submenu: "Window", windowMenu)
         NSApp.windowsMenu = windowMenu
 
@@ -91,9 +104,10 @@ enum DebugSnapshot {
         let delay = defaults.object(forKey: "snapshotDelay") == nil ? 6 : defaults.double(forKey: "snapshotDelay")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             MainActor.assumeIsolated {
-                // `-snapshotSettings YES` captures the Settings window instead.
-                if defaults.bool(forKey: "snapshotSettings"),
-                   let content = NSApp.windows.first(where: { $0.title == "Frigate Lite Settings" })?.contentView {
+                // `-snapshotSettings YES` / `-snapshotEvents YES` capture that window instead.
+                let other = defaults.bool(forKey: "snapshotSettings") ? "Frigate Lite Settings"
+                    : defaults.bool(forKey: "snapshotEvents") ? "Events" : nil
+                if let other, let content = NSApp.windows.first(where: { $0.title == other })?.contentView {
                     write(view: content, to: path)
                 } else {
                     write(view: view, to: path)
